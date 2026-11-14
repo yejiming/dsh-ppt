@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import z from 'schemastery'
@@ -91,7 +91,7 @@ async function run(ctx: Context, config: Config, io: HeadlessIo): Promise<void> 
   }))
   await agent.whenIdle()
   await sessions.flush(agent.session)
-  const outcome = summarize(agent.session.events, firstSeq)
+  const outcome = summarize(agent.session.snapshotEvents(firstSeq), firstSeq)
   io.stdout.write(`${outcome.text}\n`)
   if (outcome.reason?.kind === 'error') io.stderr.write(`dsh: ${outcome.reason.error.code}: ${outcome.reason.error.message}\n`)
   io.exit(outcome.reason?.kind === 'completed' ? 0 : 1)

@@ -66,7 +66,10 @@ describe('session resources and artifacts', () => {
       postscriptName: null, weight: 'Regular', glyphCount: latin.size, supportsLatin: true, supportsCjk: false, codePoints: latin,
     }
     expect(resolveRegisteredFont('Liter', 'Hello', [fallback])).toMatchObject({ fallback: true, resolved: { name: 'HedvigLettersSans' } })
-    expect(() => resolveRegisteredFont('Unregistered', 'Hello', [fallback])).toThrow(expect.objectContaining({ code: 'PPT_OUTLINE_INVALID' }))
+    // An unknown family degrades to a deterministic registry-order fallback rather
+    // than aborting: a deck authored against a newer registry must still render.
+    expect(resolveRegisteredFont('Unregistered', 'Hello', [fallback]))
+      .toMatchObject({ requested: 'Unregistered', fallback: true, resolved: { name: 'HedvigLettersSans' } })
     expect(() => resolveRegisteredFont('MiSans', '中文', [fallback])).toThrow(expect.objectContaining({ code: 'PPT_DEPENDENCY_MISSING' }))
   })
 })

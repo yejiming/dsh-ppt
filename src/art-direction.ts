@@ -1,6 +1,5 @@
 import { z } from 'zod'
 import { PptError } from './errors.ts'
-import { FONT_REGISTRY } from './fonts.ts'
 
 export const ART_COMPOSITIONS = [
   'hero', 'editorial-split', 'asymmetric-split', 'process', 'layered', 'data-focus', 'quote', 'full-bleed', 'closing',
@@ -12,13 +11,15 @@ export const ART_ANCHOR_KINDS = ['none', 'typography', 'image', 'data', 'code', 
 export const ART_FRAME_POLICIES = ['none', 'single', 'grouped'] as const
 export const ART_ROLES = ['title', 'subtitle', 'body', 'metric', 'code', 'diagram', 'visual-anchor', 'supporting', 'frame'] as const
 
-const FONT_NAMES = FONT_REGISTRY.map(item => item.name) as [string, ...string[]]
 const text = (max: number) => z.string().transform(value => value.normalize('NFC').trim()).pipe(
   z.string().refine(value => [...value].length >= 1 && [...value].length <= max, `must contain 1..${max} Unicode code points`)
     .refine(value => !/[\r\n]/u.test(value) && !/<\/?[a-z][^>]*>/iu.test(value), 'must not contain newlines or HTML'),
 )
 const color = z.string().regex(/^#[0-9A-Fa-f]{6}$/u).transform(value => value.toUpperCase())
-const fontRole = z.strictObject({ family: z.enum(FONT_NAMES), weight: z.number().int().min(100).max(900) })
+// Font families are checked against the registry after parsing (resolveFontPlan
+// does it deterministically), not at the schema boundary. A registry newer than
+// the running host must degrade to a fallback, never reject a valid plan.
+const fontRole = z.strictObject({ family: text(120), weight: z.number().int().min(100).max(900) })
 
 const visualAnchor = z.strictObject({
   kind: z.enum(ART_ANCHOR_KINDS),

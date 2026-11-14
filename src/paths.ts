@@ -8,6 +8,17 @@ export interface ResolveWorkspacePathOptions {
   createParent?: boolean
 }
 
+// A Windows drive rooted path (`E:\dir\file`, `c:/dir/file`) or any rooted path
+// (`/dir/file`, `\\server\share\file`, `//server/share/file`). Platform independent on
+// purpose: on Windows a drive path would otherwise be parsed by `new URL` as an `e:`
+// scheme and rejected as a non-HTTP URL before the filesystem branch is reached.
+const DRIVE_ROOTED_PATH = /^[A-Za-z]:[\\/]/
+const ROOTED_PATH = /^[\\/]/
+
+export function isLocalFilesystemPath(input: string): boolean {
+  return DRIVE_ROOTED_PATH.test(input) || ROOTED_PATH.test(input)
+}
+
 export function isPathInside(root: string, target: string): boolean {
   const rel = relative(resolve(root), resolve(target))
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))

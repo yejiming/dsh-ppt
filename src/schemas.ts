@@ -1,6 +1,13 @@
+/**
+ * The shell tool this host exposes. DSH's stock presets mount `tool-bash` on
+ * darwin and linux and `tool-pwsh` on Windows, so the PPT preset follows the same
+ * split and its audit expects whichever one is actually available.
+ */
+export const PPT_SHELL_TOOL_NAME = process.platform === 'win32' ? 'pwsh' : 'bash'
+
 export const PPT_NATIVE_TOOL_NAMES = [
+  PPT_SHELL_TOOL_NAME,
   'ask_user_question',
-  'bash',
   'edit',
   'read',
   'read_image',
@@ -21,6 +28,7 @@ export const PPT_TOOL_NAMES = [
   'ppt_fonts',
   'ppt_image',
   'ppt_outline',
+  'ppt_themes',
   'python',
 ] as const
 

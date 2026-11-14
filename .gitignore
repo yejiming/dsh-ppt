@@ -37,6 +37,10 @@ Thumbs.db
 .vscode/
 .agents/
 openspec/
-docs/
+# docs/ mostly holds internal notes, but the workflow guide is published and is
+# linked from README, so it must stay tracked. A blanket `docs/` entry would also
+# make the negation below ineffective, hence the `docs/*` form.
+docs/*
+!docs/agent-workflow.md
 ppt-output/
 

@@ -9,7 +9,9 @@ import { DEFAULT_LIMITS, boundedInteger } from './limits.ts'
 import { resolveWorkspacePath, workspaceRelative } from './paths.ts'
 
 export type ImageOrientation = 'landscape' | 'portrait' | 'square' | 'any'
-export type ImageProvider = 'openverse' | 'wikimedia-commons'
+export type BuiltinImageProvider = 'openverse' | 'wikimedia-commons'
+/** Built-in providers keep literal names; the open branch lets an injected backend report its own name. */
+export type ImageProvider = BuiltinImageProvider | (string & {})
 
 export interface ImageCandidate {
   image_url: string
@@ -37,7 +39,87 @@ export interface ImageSearchResult {
   results: ImageCandidate[]
 }
 
+/** A zero-configuration retrieval backend. Built-in providers are always tried first. */
+export interface ImageSearchBackend {
+  readonly name: string
+  search(query: string, amount: number, orientation: ImageOrientation, signal?: AbortSignal): Promise<ImageCandidate[]>
+}
+
+export interface ImageSearchRuntimeOptions {
+  /** Extra backends appended after Openverse and Wikimedia Commons; empty by default. */
+  providers?: readonly ImageSearchBackend[]
+  /** Opt back into the legacy hard failure when no provider is reachable. Defaults to false. */
+  strictOnUnavailable?: boolean
+}
+
+export interface ImageSearchFallback {
+  id: string
+  tool: string
+  summary: string
+}
+
+/** Actionable alternatives carried by a degraded result when the free providers deliver nothing. */
+export const IMAGE_SEARCH_FALLBACKS: readonly ImageSearchFallback[] = [
+  { id: 'local-assets', tool: 'read_image', summary: 'reuse a raster already frozen under assets/images or listed in assets/source-manifest.json' },
+  { id: 'browser-capture', tool: 'browser_visit', summary: 'capture the visual anchor from a public page through the browser instead of the image providers' },
+  { id: 'custom-provider', tool: 'image_search', summary: 'inject an extra zero-configuration backend through the ImageSearchRuntime providers option' },
+]
+
+export type ImageSearchStatus = 'ok' | 'partial' | 'unavailable'
+
+export interface ImageSearchDegradation {
+  status: ImageSearchStatus
+  requested: number
+  returned: number
+  failures: Array<{ provider: string; kind: string }>
+  fallbacks: ImageSearchFallback[]
+}
+
 interface CacheEntry { expires: number; result: Omit<ImageSearchResult, 'cache_hit'> }
+
+const FAILURE_KINDS = new Set(['cancelled', 'timeout', 'rate_limited', 'server_error', 'invalid_response', 'network_error'])
+const DEGRADED_UNAVAILABLE = 'degraded:unavailable'
+const DEGRADED_EMPTY = 'degraded:no_results'
+const DEGRADED_PARTIAL = 'degraded:partial'
+const PROVIDER_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,31}$/
+
+function fallbackWarnings(): string[] {
+  return IMAGE_SEARCH_FALLBACKS.map(item => `fallback:${item.id}`)
+}
+
+/**
+ * Rebuilds the structured story behind the machine-readable warnings of one search result.
+ * It takes the structural subset it actually reads, so a payload derived from the tool
+ * output schema (where `license_verified` widens to `boolean`) stays assignable.
+ */
+export function describeImageSearchDegradation(
+  result: {
+    readonly count: number
+    readonly providers_used: readonly string[]
+    readonly warnings: readonly string[]
+    readonly results: readonly unknown[]
+  },
+): ImageSearchDegradation {
+  const failures = result.warnings.flatMap((warning): Array<{ provider: string; kind: string }> => {
+    const separator = warning.indexOf(':')
+    if (separator <= 0) return []
+    const provider = warning.slice(0, separator)
+    const kind = warning.slice(separator + 1)
+    if (!result.providers_used.includes(provider) || !FAILURE_KINDS.has(kind)) return []
+    return [{ provider, kind }]
+  })
+  const unavailable = result.warnings.includes(DEGRADED_UNAVAILABLE) || result.results.length === 0
+  const status: ImageSearchStatus = unavailable
+    ? 'unavailable'
+    : failures.length > 0 || result.results.length < result.count ? 'partial' : 'ok'
+  return {
+    status,
+    requested: result.count,
+    returned: result.results.length,
+    failures,
+    fallbacks: IMAGE_SEARCH_FALLBACKS.filter(item => result.warnings.includes(`fallback:${item.id}`)),
+  }
+}
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 type UrlValidator = (input: string) => Promise<URL>
@@ -129,8 +211,27 @@ function upstreamCategory(error: unknown): string {
 
 export class ImageSearchRuntime {
   private readonly cache = new Map<string, CacheEntry>()
+  private readonly backends: readonly ImageSearchBackend[]
+  private readonly strictOnUnavailable: boolean
 
-  constructor(private readonly fetcher: FetchLike = fetch, private readonly validateUrl: UrlValidator = validatePublicHttpUrl) {}
+  constructor(
+    private readonly fetcher: FetchLike = fetch,
+    private readonly validateUrl: UrlValidator = validatePublicHttpUrl,
+    options: ImageSearchRuntimeOptions = {},
+  ) {
+    const injected = options.providers ?? []
+    for (const backend of injected) {
+      if (!PROVIDER_NAME_PATTERN.test(backend.name) || backend.name === 'openverse' || backend.name === 'wikimedia-commons') {
+        throw new PptError('IMAGE_SEARCH_FAILED', `invalid extra image provider name: ${backend.name}`)
+      }
+    }
+    this.backends = [
+      { name: 'openverse', search: (query, amount, orientation, signal) => this.openverse(query, amount, orientation, signal) },
+      { name: 'wikimedia-commons', search: (query, amount, orientation, signal) => this.commons(query, amount, orientation, signal) },
+      ...injected,
+    ]
+    this.strictOnUnavailable = options.strictOnUnavailable === true
+  }
 
   async search(queryInput: string, countInput = 8, orientation: ImageOrientation = 'any', signal?: AbortSignal): Promise<ImageSearchResult> {
     throwIfAborted(signal)
@@ -145,28 +246,36 @@ export class ImageSearchRuntime {
 
     const providersUsed: ImageProvider[] = []
     const warnings: string[] = []
+    const failures: Array<{ provider: string; kind: string }> = []
     const candidates: ImageCandidate[] = []
-    try {
-      providersUsed.push('openverse')
-      candidates.push(...await this.openverse(query, Math.min(40, count * 3), orientation, signal))
-    } catch (error) {
-      if (signal?.aborted) throwIfAborted(signal)
-      warnings.push(`openverse:${upstreamCategory(error)}`)
-    }
-    if (candidates.length < count) {
+    for (const backend of this.backends) {
+      if (candidates.length >= count) break
+      providersUsed.push(backend.name)
       try {
-        providersUsed.push('wikimedia-commons')
-        candidates.push(...await this.commons(query, Math.min(40, count * 3), orientation, signal))
+        candidates.push(...await backend.search(query, Math.min(40, count * 3), orientation, signal))
       } catch (error) {
         if (signal?.aborted) throwIfAborted(signal)
-        warnings.push(`wikimedia-commons:${upstreamCategory(error)}`)
+        const kind = upstreamCategory(error)
+        failures.push({ provider: backend.name, kind })
+        warnings.push(`${backend.name}:${kind}`)
       }
     }
     const seen = new Set<string>()
     const results = candidates.filter(item => !seen.has(item.image_url) && seen.add(item.image_url)).slice(0, count)
-    if (results.length === 0 && warnings.length >= providersUsed.length) {
-      throw new PptError('IMAGE_SEARCH_FAILED', 'Openverse and Wikimedia Commons are unavailable', { details: { failures: warnings } })
+    if (results.length === 0) {
+      const unreachable = providersUsed.length > 0 && failures.length >= providersUsed.length
+      warnings.push(unreachable ? DEGRADED_UNAVAILABLE : DEGRADED_EMPTY)
+      warnings.push(...fallbackWarnings())
+      warnings.push(`insufficient_results:0/${count}`)
+      if (this.strictOnUnavailable && unreachable) {
+        throw new PptError('IMAGE_SEARCH_FAILED', 'no zero-configuration image provider is reachable', {
+          details: { status: 'unavailable', failures, fallbacks: IMAGE_SEARCH_FALLBACKS },
+        })
+      }
+      // A degraded answer is never cached, so the next call really retries the providers.
+      return { query, count, orientation, cache_hit: false, providers_used: providersUsed, warnings, results }
     }
+    if (failures.length > 0) warnings.push(DEGRADED_PARTIAL)
     if (results.length < count) warnings.push(`insufficient_results:${results.length}/${count}`)
     const stored = { query, count, orientation, providers_used: providersUsed, warnings, results }
     this.cache.set(key, { expires: Date.now() + 10 * 60_000, result: structuredClone(stored) })

@@ -1,5 +1,5 @@
 import { homedir } from 'node:os'
-import { join, win32 } from 'node:path'
+import { posix, win32 } from 'node:path'
 
 export function isSupportedPlatform(platform: NodeJS.Platform = process.platform): boolean {
   return platform === 'darwin' || platform === 'linux' || platform === 'win32'
@@ -14,7 +14,7 @@ export function systemFontDirectories(
     return [
       '/System/Library/Fonts', '/System/Library/Fonts/Supplemental',
       '/System/Library/AssetsV2/com_apple_MobileAsset_Font7', '/System/Library/AssetsV2/com_apple_MobileAsset_Font8',
-      '/Library/Fonts', join(home, 'Library/Fonts'),
+      '/Library/Fonts', posix.join(home, 'Library/Fonts'),
     ]
   }
   if (platform === 'win32') {
@@ -22,7 +22,7 @@ export function systemFontDirectories(
     const local = env.LOCALAPPDATA
     return [win32.join(windows, 'Fonts'), ...(local === undefined ? [] : [win32.join(local, 'Microsoft', 'Windows', 'Fonts')])]
   }
-  return ['/usr/share/fonts', '/usr/local/share/fonts', join(home, '.local/share/fonts'), join(home, '.fonts')]
+  return ['/usr/share/fonts', '/usr/local/share/fonts', posix.join(home, '.local/share/fonts'), posix.join(home, '.fonts')]
 }
 
 export function libreOfficeCandidates(
@@ -56,7 +56,7 @@ export function keynoteCandidates(
   home: string = homedir(),
 ): string[] {
   return platform === 'darwin'
-    ? ['/Applications/Keynote.app', join(home, 'Applications/Keynote.app')]
+    ? ['/Applications/Keynote.app', posix.join(home, 'Applications/Keynote.app')]
     : []
 }
 
@@ -72,7 +72,7 @@ export function powerPointCandidates(
   home: string = homedir(),
 ): string[] {
   if (platform === 'darwin') {
-    return ['/Applications/Microsoft PowerPoint.app', join(home, 'Applications/Microsoft PowerPoint.app')]
+    return ['/Applications/Microsoft PowerPoint.app', posix.join(home, 'Applications/Microsoft PowerPoint.app')]
   }
   if (platform !== 'win32') return []
   const roots = [env.ProgramFiles, env['ProgramFiles(x86)'], env.LOCALAPPDATA]
@@ -104,7 +104,7 @@ export function browserSystemCandidates(
     return [
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
       '/Applications/Chromium.app/Contents/MacOS/Chromium',
-      join(home, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+      posix.join(home, 'Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
     ]
   }
   if (platform === 'win32') {

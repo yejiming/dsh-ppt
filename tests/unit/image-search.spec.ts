@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { describe, expect, it, vi } from 'vitest'
 import sharp from 'sharp'
 import { allocateArtifactDirectory } from '../../src/artifacts.ts'
-import { freezeImageAsset, ImageSearchRuntime } from '../../src/image-search.ts'
+import { describeImageSearchDegradation, freezeImageAsset, ImageSearchRuntime } from '../../src/image-search.ts'
 import { createTestWorkspace } from '../helpers/workspace.ts'
 
 function json(value: unknown, status = 200): Response {
@@ -71,8 +71,10 @@ describe('zero-configuration image search', () => {
     expect(filtered.results).toHaveLength(0)
     expect(filtered.warnings).toContain('insufficient_results:0/2')
 
-    const failed = new ImageSearchRuntime(async () => json({}, 503), publicUrl)
-    await expect(failed.search('safe topic', 1)).rejects.toMatchObject({ code: 'IMAGE_SEARCH_FAILED' })
+    const unavailable = new ImageSearchRuntime(async () => json({}, 503), publicUrl)
+    const degraded = await unavailable.search('safe topic', 1)
+    expect(degraded.results).toHaveLength(0)
+    expect(degraded.warnings).toContain('degraded:unavailable')
   })
 
   it('freezes a selected raster with dimensions, hash, and source record', async () => {
@@ -112,5 +114,139 @@ describe('zero-configuration image search', () => {
     } finally {
       await workspace.cleanup()
     }
+  })
+})
+
+describe('degradable image search', () => {
+  it('uses both providers when the primary page is short and Commons completes it', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input))
+      if (url.hostname === 'api.openverse.org') return json({ results: [
+        { url: 'https://images.example/primary.jpg', foreign_landing_url: 'https://source.example/primary', title: 'Primary', width: 1600, height: 900 },
+      ] })
+      return json({ query: { pages: { 7: {
+        title: 'File:Secondary.jpg', fullurl: 'https://commons.example/wiki/File:Secondary.jpg',
+        imageinfo: [{ url: 'https://upload.example/secondary.jpg', width: 2000, height: 1000, mime: 'image/jpeg', extmetadata: { LicenseShortName: { value: 'CC0' } } }],
+      } } } })
+    })
+    const result = await new ImageSearchRuntime(fetcher, publicUrl).search('modern skyline', 2, 'landscape')
+    expect(result.providers_used).toEqual(['openverse', 'wikimedia-commons'])
+    expect(result.results.map(item => item.provider)).toEqual(['openverse', 'wikimedia-commons'])
+    expect(result.warnings).not.toContain('degraded:partial')
+    expect(result.warnings).not.toContain('degraded:unavailable')
+    expect(describeImageSearchDegradation(result)).toEqual({ status: 'ok', requested: 2, returned: 2, failures: [], fallbacks: [] })
+  })
+
+  it('degrades to a partial result when only one provider is rate limited', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input))
+      if (url.hostname === 'api.openverse.org') return json({}, 429)
+      return json({ query: { pages: {
+        1: { title: 'File:A.jpg', fullurl: 'https://commons.example/wiki/File:A.jpg', imageinfo: [{ url: 'https://upload.example/a.jpg', width: 1600, height: 900, mime: 'image/jpeg', extmetadata: {} }] },
+        2: { title: 'File:B.jpg', fullurl: 'https://commons.example/wiki/File:B.jpg', imageinfo: [{ url: 'https://upload.example/b.jpg', width: 1600, height: 900, mime: 'image/jpeg', extmetadata: {} }] },
+      } } })
+    })
+    const result = await new ImageSearchRuntime(fetcher, publicUrl).search('architecture', 2, 'landscape')
+    expect(result.results).toHaveLength(2)
+    expect(result.warnings).toContain('openverse:rate_limited')
+    expect(result.warnings).toContain('degraded:partial')
+    expect(result.warnings.filter(item => item.startsWith('fallback:'))).toEqual([])
+    expect(describeImageSearchDegradation(result)).toMatchObject({
+      status: 'partial', requested: 2, returned: 2, failures: [{ provider: 'openverse', kind: 'rate_limited' }], fallbacks: [],
+    })
+  })
+
+  it('returns an actionable degraded result instead of a hard failure when both providers fail', async () => {
+    const fetcher = vi.fn(async () => { throw new TypeError('fetch failed') })
+    const result = await new ImageSearchRuntime(fetcher, publicUrl).search('modern skyline', 4, 'landscape')
+    expect(result).toMatchObject({ count: 4, cache_hit: false, providers_used: ['openverse', 'wikimedia-commons'], results: [] })
+    expect(result.warnings).toEqual([
+      'openverse:network_error',
+      'wikimedia-commons:network_error',
+      'degraded:unavailable',
+      'fallback:local-assets',
+      'fallback:browser-capture',
+      'fallback:custom-provider',
+      'insufficient_results:0/4',
+    ])
+    const degradation = describeImageSearchDegradation(result)
+    expect(degradation).toMatchObject({
+      status: 'unavailable', requested: 4, returned: 0,
+      failures: [{ provider: 'openverse', kind: 'network_error' }, { provider: 'wikimedia-commons', kind: 'network_error' }],
+    })
+    expect(degradation.fallbacks.map(item => item.id)).toEqual(['local-assets', 'browser-capture', 'custom-provider'])
+    expect(degradation.fallbacks.map(item => item.tool)).toEqual(['read_image', 'browser_visit', 'image_search'])
+  })
+
+  it('reports no reachable result when both providers answer with unusable candidates', async () => {
+    const fetcher = vi.fn(async () => json({ results: [
+      { url: 'data:image/png;base64,x', foreign_landing_url: 'https://source.example/bad', title: 'unsafe scheme' },
+    ] }))
+    const result = await new ImageSearchRuntime(fetcher, publicUrl).search('safe topic', 2, 'landscape')
+    expect(result.results).toHaveLength(0)
+    expect(result.warnings).toContain('degraded:no_results')
+    expect(result.warnings).not.toContain('degraded:unavailable')
+    expect(describeImageSearchDegradation(result)).toMatchObject({ status: 'unavailable', returned: 0, failures: [] })
+  })
+
+  it('retries the providers on the next call because a degraded answer is not cached', async () => {
+    const fetcher = vi.fn(async () => { throw new TypeError('fetch failed') })
+    const runtime = new ImageSearchRuntime(fetcher, publicUrl)
+    await runtime.search('modern skyline', 1, 'landscape')
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    const second = await runtime.search('modern skyline', 1, 'landscape')
+    expect(second.cache_hit).toBe(false)
+    expect(fetcher).toHaveBeenCalledTimes(4)
+  })
+
+  it('still uses an injected zero-configuration backend when the built-ins are unreachable', async () => {
+    const fetcher = vi.fn(async () => json({}, 503))
+    const runtime = new ImageSearchRuntime(fetcher, publicUrl, { providers: [{
+      name: 'local-library',
+      search: async () => [{
+        image_url: 'https://images.example/injected.jpg', source_page: 'https://source.example/injected',
+        provider: 'local-library', title: 'Injected', license: 'CC0', license_verified: false, width: 1600, height: 900,
+      }],
+    }] })
+    const result = await runtime.search('modern skyline', 1, 'landscape')
+    expect(result.providers_used).toEqual(['openverse', 'wikimedia-commons', 'local-library'])
+    expect(result.results.map(item => item.provider)).toEqual(['local-library'])
+    expect(result.warnings).not.toContain('degraded:unavailable')
+    expect(describeImageSearchDegradation(result)).toMatchObject({ status: 'partial', returned: 1 })
+
+    expect(() => new ImageSearchRuntime(fetcher, publicUrl, { providers: [{ name: 'openverse', search: async () => [] }] }))
+      .toThrowError(/invalid extra image provider name/)
+  })
+
+  it('keeps the hard failure available on demand with structured fallbacks in details', async () => {
+    const fetcher = vi.fn(async () => json({}, 503))
+    const runtime = new ImageSearchRuntime(fetcher, publicUrl, { strictOnUnavailable: true })
+    await expect(runtime.search('modern skyline', 1, 'landscape')).rejects.toMatchObject({
+      code: 'IMAGE_SEARCH_FAILED',
+      message: 'no zero-configuration image provider is reachable',
+      details: {
+        status: 'unavailable',
+        failures: [{ provider: 'openverse', kind: 'server_error' }, { provider: 'wikimedia-commons', kind: 'server_error' }],
+      },
+    })
+  })
+
+  it('keeps the image_search tool contract shape on the degraded path', async () => {
+    // Mirrors the seven declared properties of IMAGE_SEARCH_OUTPUT in src/tools.ts.
+    const result = await new ImageSearchRuntime(async () => json({}, 503), publicUrl).search('modern skyline', 1)
+    expect(Object.keys(result).sort()).toEqual(['cache_hit', 'count', 'orientation', 'providers_used', 'query', 'results', 'warnings'])
+    expect(result.results).toEqual([])
+    expect(result.providers_used.every(item => typeof item === 'string')).toBe(true)
+    expect(result.warnings.every(item => typeof item === 'string')).toBe(true)
+  })
+
+  it('still aborts instead of degrading when the caller cancels', async () => {
+    const controller = new AbortController()
+    const fetcher = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      controller.abort()
+      throw init?.signal?.reason ?? new DOMException('aborted', 'AbortError')
+    })
+    const runtime = new ImageSearchRuntime(fetcher as unknown as typeof fetch, publicUrl)
+    await expect(runtime.search('modern skyline', 1, 'landscape', controller.signal)).rejects.toMatchObject({ code: 'PPT_ABORTED' })
   })
 })

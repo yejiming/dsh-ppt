@@ -32,6 +32,23 @@ export interface HtmlPreviewResult {
         }>;
     }>;
 }
+/** A leaf rectangle expressed relative to the slide origin. */
+export interface SlideLeafBox {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+}
+export interface SlideSize {
+    width: number;
+    height: number;
+}
+/**
+ * 4x4 occupancy silhouette of one slide, used to detect adjacent pages with the same layout.
+ * Full-bleed layers are skipped: a page background leaf is identical on every page and would
+ * light all sixteen cells everywhere, so every adjacent pair would look repeated.
+ */
+export declare function occupancySilhouette(leafBoxes: readonly SlideLeafBox[], slide?: SlideSize): number[];
 export declare class BrowserRuntime {
     private readonly resources;
     private readonly configuredExecutable?;
@@ -52,6 +69,7 @@ export declare class BrowserRuntime {
     private requireState;
     private requireExisting;
     private resolveVisitUrl;
+    private resolveLocalFileUrl;
     private validateCurrentUrl;
     private bumpVersion;
     private refreshMutationVersion;

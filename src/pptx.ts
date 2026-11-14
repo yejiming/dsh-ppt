@@ -9,9 +9,11 @@ import { PptError, throwIfAborted } from './errors.ts'
 import type { DeckIR, ElementIR, ElementStyleIR } from './ir.ts'
 import { pxToInches, pxToPoints, SLIDE_HEIGHT_IN, SLIDE_WIDTH_IN } from './ir.ts'
 import { validatePptOutline } from './outline.ts'
-import { isPathInside, resolveWorkspacePath, workspaceRelative } from './paths.ts'
+import { isLocalFilesystemPath, isPathInside, resolveWorkspacePath, workspaceRelative } from './paths.ts'
 import type { SessionOwner } from './session-resources.ts'
 import { validateDeckHtmlSource } from './html.ts'
+import { rewritePptxTransitions, type SlideTransitionPlan } from './transitions.ts'
+import { rewritePptxAnimations, type AnimationPlan } from './animation.ts'
 
 export type PptFallbackMode = 'reject' | 'rasterize-element'
 
@@ -73,13 +75,20 @@ function textOptions(style: ElementStyleIR) {
 
 function imageSource(pathOrUrl: string, workspace: string, artifactRoot: string): string {
   let path: string
-  try {
-    const parsed = new URL(pathOrUrl)
-    if (parsed.protocol !== 'file:') throw new PptError('PPT_CREATE_ASSET_MISSING', 'PPTX images must be local frozen files')
-    path = fileURLToPath(parsed)
-  } catch (error) {
-    if (error instanceof PptError) throw error
+  if (isLocalFilesystemPath(pathOrUrl)) {
+    // `new URL('E:\\dir\\a.png')` parses successfully on Windows with the drive
+    // letter as the scheme, so a bare platform path must never reach URL parsing.
     path = pathOrUrl
+  } else {
+    let parsed: URL | undefined
+    try {
+      parsed = new URL(pathOrUrl)
+    } catch {
+      parsed = undefined
+    }
+    if (parsed === undefined) path = pathOrUrl
+    else if (parsed.protocol === 'file:') path = fileURLToPath(parsed)
+    else throw new PptError('PPT_CREATE_ASSET_MISSING', 'PPTX images must be local frozen files')
   }
   if (!isPathInside(workspace, path) || !isPathInside(artifactRoot, path)) {
     throw new PptError('PPT_CREATE_ASSET_MISSING', `image is outside the artifact directory: ${path}`)
@@ -206,6 +215,8 @@ export async function createPptx(
   outputPathInput: string,
   fallbackMode: PptFallbackMode = 'reject',
   signal?: AbortSignal,
+  transitions?: SlideTransitionPlan,
+  animations?: AnimationPlan,
 ): Promise<PptCreateResult> {
   throwIfAborted(signal, 'PPT_CREATE_ABORTED')
   const [htmlPath, outlinePath, outputPath] = await Promise.all([
@@ -273,7 +284,13 @@ export async function createPptx(
   try {
     await pptx.writeFile({ fileName: temporary, compression: true })
     throwIfAborted(signal, 'PPT_CREATE_ABORTED')
-    const bytes = new Uint8Array(await readFile(temporary))
+    const written = new Uint8Array(await readFile(temporary))
+    // The transition and animation plans rewrite slide parts inside the package before
+    // the atomic commit. Without a plan the bytes written by pptxgenjs are committed
+    // untouched, so a deck that opts out stays byte-comparable with its source.
+    let bytes: Uint8Array = written
+    if (transitions !== undefined) bytes = rewritePptxTransitions(bytes, transitions)
+    if (animations !== undefined) bytes = rewritePptxAnimations(bytes, animations)
     inspectPptxPackage(bytes, outline.length)
     await atomicWriteFile(outputPath, bytes, { signal })
     return {

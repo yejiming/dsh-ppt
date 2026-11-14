@@ -18,27 +18,19 @@ export declare const ArtDirectionSchema: z.ZodObject<{
     }, z.core.$strict>;
     typography: z.ZodObject<{
         display: z.ZodObject<{
-            family: z.ZodEnum<{
-                [x: string]: string;
-            }>;
+            family: z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<string, string>>, z.ZodString>;
             weight: z.ZodNumber;
         }, z.core.$strict>;
         body: z.ZodObject<{
-            family: z.ZodEnum<{
-                [x: string]: string;
-            }>;
+            family: z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<string, string>>, z.ZodString>;
             weight: z.ZodNumber;
         }, z.core.$strict>;
         latin: z.ZodObject<{
-            family: z.ZodEnum<{
-                [x: string]: string;
-            }>;
+            family: z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<string, string>>, z.ZodString>;
             weight: z.ZodNumber;
         }, z.core.$strict>;
         code: z.ZodObject<{
-            family: z.ZodEnum<{
-                [x: string]: string;
-            }>;
+            family: z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<string, string>>, z.ZodString>;
             weight: z.ZodNumber;
         }, z.core.$strict>;
     }, z.core.$strict>;

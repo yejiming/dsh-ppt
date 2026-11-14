@@ -462,7 +462,7 @@ export class PptImageRuntime {
       await atomicWriteText(script, KEYNOTE_SCRIPT, { signal })
       const output = join(rawDirectory, 'export')
       const argv = [available.executables.osascript!, script, pptxPath, output]
-      const command = nativeAutomationApproved ? argv : this.sandbox!.confine(argv, { mode: 'workspace-write', workspaceRoot: workspace }).argv
+      const command = nativeAutomationApproved ? argv : (await this.sandbox!.confine(argv, { mode: 'workspace-write', workspaceRoot: workspace })).argv
       const result = await runCollected(this.subprocess!, command, { cwd: dirname(pptxPath), signal, timeoutMs: 90_000, maxOutputBytes: 32_768 })
       if (result.exitCode !== 0) throw new PptError('PPT_RENDER_FAILED', processFailure('Keynote export', result.exitCode, result.stdout, result.stderr))
       return
@@ -480,7 +480,7 @@ export class PptImageRuntime {
           String(pptxPageCount(new Uint8Array(await readFile(sourceCopy)))),
           available.executables.screencapture!, String(screenIndex),
         ]
-        const command = nativeAutomationApproved ? argv : this.sandbox!.confine(argv, { mode: 'workspace-write', workspaceRoot: workspace }).argv
+        const command = nativeAutomationApproved ? argv : (await this.sandbox!.confine(argv, { mode: 'workspace-write', workspaceRoot: workspace })).argv
         const result = await runCollected(this.subprocess!, command, { cwd: dirname(pptxPath), signal, timeoutMs: 180_000, maxOutputBytes: 32_768 })
         if (result.exitCode !== 0) throw new PptError('PPT_RENDER_FAILED', processFailure('PowerPoint screen capture', result.exitCode, result.stdout, result.stderr))
         return
@@ -493,7 +493,7 @@ export class PptImageRuntime {
         available.executables.powershell!, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
         '-File', script, '-InputPptx', pptxPath, '-OutputDir', output,
       ]
-      const command = nativeAutomationApproved ? argv : this.sandbox!.confine(argv, { mode: 'workspace-write', workspaceRoot: workspace }).argv
+      const command = nativeAutomationApproved ? argv : (await this.sandbox!.confine(argv, { mode: 'workspace-write', workspaceRoot: workspace })).argv
       const result = await runCollected(this.subprocess!, command, { cwd: dirname(pptxPath), signal, timeoutMs: 90_000, maxOutputBytes: 32_768 })
       if (result.exitCode !== 0) throw new PptError('PPT_RENDER_FAILED', processFailure('PowerPoint export', result.exitCode, result.stdout, result.stderr))
       return
@@ -511,7 +511,7 @@ export class PptImageRuntime {
       XDG_CACHE_HOME: fontCache,
       SAL_PRIVATE_FONTPATH: renderFontDirs.join(delimiter),
     }
-    const convert = this.sandbox!.confine([
+    const convert = await this.sandbox!.confine([
       available.executables.soffice!, '--headless', '--nologo', '--nodefault', '--nolockcheck', '--norestore',
       `-env:UserInstallation=${pathToFileURL(profile).href}`, '--convert-to', 'pdf', '--outdir', pdfDirectory, pptxPath,
     ], { mode: 'workspace-write', workspaceRoot: workspace })
@@ -520,7 +520,7 @@ export class PptImageRuntime {
     if (converted.exitCode !== 0) throw new PptError('PPT_RENDER_FAILED', processFailure('LibreOffice', converted.exitCode, converted.stdout, converted.stderr))
     const pdf = join(pdfDirectory, `${basename(pptxPath, '.pptx')}.pdf`)
     await access(pdf)
-    const raster = this.sandbox!.confine([
+    const raster = await this.sandbox!.confine([
       available.executables.pdftoppm!, '-png', '-r', '96', '-scale-to-x', '1280', '-scale-to-y', '720', '-cropbox', pdf, join(rawDirectory, 'page'),
     ], { mode: 'workspace-write', workspaceRoot: workspace })
     const rasterized = await runCollected(this.subprocess!, raster.argv, { cwd: dirname(pptxPath), signal, timeoutMs: 60_000, maxOutputBytes: 32_768 })

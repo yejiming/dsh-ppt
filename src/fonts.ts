@@ -3,6 +3,7 @@ import { opendir, readFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
 import * as fontkit from 'fontkit'
 import { PptError } from './errors.ts'
+import type { InstalledFontFace } from './font-files.ts'
 import { systemFontDirectories } from './platform.ts'
 
 export interface FontDescriptor {
@@ -225,6 +226,41 @@ function semanticRole(font: FontDescriptor, text: string): FontRole {
   return serif ? 'latin-serif' : 'latin-sans'
 }
 
+/**
+ * Adapts the machine-wide font inventory onto the shape the outline resolver
+ * already understands, so a deck may name any font that is actually installed
+ * instead of only the families in the built-in registry. Coverage is rebuilt
+ * from the face flags: a code point enters the set only when the face claims the
+ * script covering it, which keeps `supportsText` meaningful without re-reading
+ * every glyph table of every installed font. Pass `wanted` to restrict the
+ * conversion to the families a deck actually names.
+ */
+export function installedFontsAsDiscovered(
+  faces: readonly InstalledFontFace[],
+  wanted?: ReadonlySet<string>,
+): DiscoveredFont[] {
+  const discovered: DiscoveredFont[] = []
+  for (const face of faces) {
+    if (wanted !== undefined && !wanted.has(fontKey(face.family))) continue
+    const codePoints = new Set<number>()
+    if (face.supportsLatin) for (let point = 0x20; point <= 0x7e; point += 1) codePoints.add(point)
+    if (face.supportsCjk) for (let point = 0x4e00; point <= 0x9fa5; point += 1) codePoints.add(point)
+    discovered.push({
+      name: face.family,
+      file: face.file,
+      sha256: face.sha256,
+      familyName: face.family,
+      postscriptName: face.postscriptName,
+      weight: face.subfamily,
+      glyphCount: face.glyphCount,
+      supportsLatin: face.supportsLatin,
+      supportsCjk: face.supportsCjk,
+      codePoints,
+    })
+  }
+  return discovered
+}
+
 export function registeredFont(name: string): FontDescriptor | undefined {
   return REGISTERED_BY_KEY.get(fontKey(name))
 }
@@ -255,6 +291,36 @@ export interface ResolvedFont {
   warning?: string
 }
 
+/**
+ * A font name this build does not know about — for example a deck authored
+ * against a newer registry than the one the running host has loaded — must not
+ * abort the whole pipeline. Fall back in registry order so the outcome stays
+ * deterministic, and leave a warning the caller can surface.
+ */
+function resolveUnregisteredFont(
+  name: string,
+  text: string,
+  discovered: readonly DiscoveredFont[],
+  platform: NodeJS.Platform,
+): ResolvedFont {
+  const supported = supportedPlatform(platform)
+  for (const candidate of FONT_REGISTRY) {
+    if (!candidate.platforms.includes(supported)) continue
+    const font = discovered.find(item => item.name === candidate.name && supportsText(item, text))
+    if (font !== undefined) {
+      return {
+        requested: name,
+        resolved: font,
+        fallback: true,
+        warning: `font ${name} is not registered in this build; replaced with ${supported} fallback ${candidate.name}`,
+      }
+    }
+  }
+  throw new PptError('PPT_DEPENDENCY_MISSING', `no installed approved font covers the requested text for ${name}`, {
+    details: { requested: name, platform: supported },
+  })
+}
+
 export function resolveRegisteredFont(
   name: string,
   text: string,
@@ -262,7 +328,7 @@ export function resolveRegisteredFont(
   platform: NodeJS.Platform = process.platform,
 ): ResolvedFont {
   const requested = registeredFont(name)
-  if (requested === undefined) throw new PptError('PPT_OUTLINE_INVALID', `font is not registered: ${name}`)
+  if (requested === undefined) return resolveUnregisteredFont(name, text, discovered, platform)
   const candidates = fontFallbackCandidates(requested.name, text, platform)
   for (const candidate of candidates) {
     const font = discovered.find(item => item.name === candidate && supportsText(item, text))

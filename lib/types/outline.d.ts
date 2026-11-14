@@ -1,7 +1,8 @@
 import { z } from 'zod';
+import type { ArtDirection } from './art-direction.ts';
 import { type DiscoveredFont } from './fonts.ts';
-export declare const SLIDE_TYPES: readonly ["cover", "agenda", "section", "content", "comparison", "timeline", "process", "data", "quote", "summary", "ending"];
-export declare const SLIDE_LAYOUTS: readonly ["cover", "center", "title-content", "split", "two-column", "three-column", "grid", "hero-image", "image-left", "image-right", "timeline-horizontal", "timeline-vertical", "process-horizontal", "process-vertical", "chart-focus", "quote-focus", "full-bleed", "closing"];
+import { type PptTheme } from './themes.ts';
+export { SLIDE_LAYOUTS, SLIDE_TYPES } from './slide-taxonomy.ts';
 export declare const OutlineContentItemSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     kind: z.ZodLiteral<"point">;
     text: z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<string, string>>, z.ZodString>;
@@ -138,9 +139,9 @@ export declare const PptOutlineSchema: z.ZodArray<z.ZodObject<{
     }, z.core.$strict>], "kind">>;
     style: z.ZodObject<{
         layout: z.ZodEnum<{
+            split: "split";
             "full-bleed": "full-bleed";
             closing: "closing";
-            split: "split";
             center: "center";
             cover: "cover";
             "title-content": "title-content";
@@ -164,12 +165,8 @@ export declare const PptOutlineSchema: z.ZodArray<z.ZodObject<{
             dark: "dark";
         }>;
         accent: z.ZodPipe<z.ZodString, z.ZodTransform<string, string>>;
-        title_font: z.ZodEnum<{
-            [x: string]: string;
-        }>;
-        body_font: z.ZodEnum<{
-            [x: string]: string;
-        }>;
+        title_font: z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<string, string>>, z.ZodString>;
+        body_font: z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<string, string>>, z.ZodString>;
         visual_direction: z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<string, string>>, z.ZodString>;
     }, z.core.$strict>;
 }, z.core.$strict>>;
@@ -184,10 +181,26 @@ export interface OutlineWriteResult {
     fonts: string[];
     warnings: string[];
     blocking_warnings: string[];
+    /** Present only when the caller pinned the deck to a built-in theme. */
+    theme?: {
+        id: string;
+        name: string;
+        palette_source: string;
+        accent: string;
+        accent_inverted: string;
+        findings: string[];
+    };
 }
+/**
+ * Check that an authored outline and plan still belong to the theme they name.
+ * Selecting a theme and then using unrelated colours or fonts is the failure
+ * this catches: the deck reads as neither the theme nor the brief.
+ */
+export declare function themeConformanceFindings(theme: PptTheme, outline: PptOutline, designPlan: ArtDirection | undefined): string[];
+export declare function resolveTheme(themeId: string): PptTheme;
 export interface OutlineFontResolutionOptions {
     discovered: readonly DiscoveredFont[];
     platform?: NodeJS.Platform;
 }
 export declare function validatePptOutline(value: unknown): PptOutline;
-export declare function writePptOutline(workspace: string, artifactTitle: string, value: unknown, outputRoot?: string, signal?: AbortSignal, artDirection?: unknown, fontResolution?: OutlineFontResolutionOptions): Promise<OutlineWriteResult>;
+export declare function writePptOutline(workspace: string, artifactTitle: string, value: unknown, outputRoot?: string, signal?: AbortSignal, artDirection?: unknown, fontResolution?: OutlineFontResolutionOptions, themeId?: string): Promise<OutlineWriteResult>;

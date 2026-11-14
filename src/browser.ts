@@ -7,7 +7,7 @@ import { discoverBrowserExecutable } from './browser-discovery.ts'
 import { validatePublicHttpUrl } from './browser-security.ts'
 import { DEFAULT_LIMITS } from './limits.ts'
 import { PptError, throwIfAborted } from './errors.ts'
-import { isPathInside, resolveWorkspacePath, workspaceRelative } from './paths.ts'
+import { isLocalFilesystemPath, isPathInside, resolveWorkspacePath, workspaceRelative } from './paths.ts'
 import type { SessionOwner } from './session-resources.ts'
 import { SessionResourceRegistry } from './session-resources.ts'
 import type { DeckIR, ElementIR } from './ir.ts'
@@ -56,6 +56,48 @@ interface BrowserState {
 
 function keyOf(owner: SessionOwner): string {
   return `${owner.agentId}\0${owner.sessionId}`
+}
+
+/** A leaf rectangle expressed relative to the slide origin. */
+export interface SlideLeafBox {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+export interface SlideSize {
+  width: number
+  height: number
+}
+
+const SLIDE_SIZE: SlideSize = { width: 1280, height: 720 }
+/** Only a leaf covering the slide on all four sides counts as a full-bleed layer. */
+const FULL_BLEED_TOLERANCE_PX = 1
+
+function coversWholeSlide(box: SlideLeafBox, slide: SlideSize): boolean {
+  return box.left <= FULL_BLEED_TOLERANCE_PX && box.top <= FULL_BLEED_TOLERANCE_PX
+    && box.right >= slide.width - FULL_BLEED_TOLERANCE_PX && box.bottom >= slide.height - FULL_BLEED_TOLERANCE_PX
+}
+
+/**
+ * 4x4 occupancy silhouette of one slide, used to detect adjacent pages with the same layout.
+ * Full-bleed layers are skipped: a page background leaf is identical on every page and would
+ * light all sixteen cells everywhere, so every adjacent pair would look repeated.
+ */
+export function occupancySilhouette(leafBoxes: readonly SlideLeafBox[], slide: SlideSize = SLIDE_SIZE): number[] {
+  const occupancy = Array.from({ length: 16 }, () => 0)
+  const cellWidth = slide.width / 4
+  const cellHeight = slide.height / 4
+  for (const box of leafBoxes) {
+    if (coversWholeSlide(box, slide)) continue
+    for (let row = 0; row < 4; row += 1) for (let column = 0; column < 4; column += 1) {
+      const left = column * cellWidth
+      const top = row * cellHeight
+      if (box.right > left && box.left < left + cellWidth && box.bottom > top && box.top < top + cellHeight) occupancy[row * 4 + column] = 1
+    }
+  }
+  return occupancy
 }
 
 export class BrowserRuntime {
@@ -179,22 +221,19 @@ export class BrowserRuntime {
       const warnings: string[] = []
       const usedFonts = new Set<string>()
       if (slides.length !== count) errors.push(`expected ${count} slides but found ${slides.length}`)
-      const designPages: Array<{ page: number; anchorAreaRatio?: number; frameCount: number; occupancy: number[]; roleStyles: Array<{ role: string; fontFamily: string; fontWeight: number }> }> = []
+      const designPages: Array<{ page: number; anchorAreaRatio?: number; frameCount: number; leafBoxes: SlideLeafBox[]; roleStyles: Array<{ role: string; fontFamily: string; fontWeight: number }> }> = []
       slides.forEach((slide, slideIndex) => {
         const slideBox = slide.getBoundingClientRect()
-        const occupancy = Array.from({ length: 16 }, () => 0)
+        const leafBoxes: SlideLeafBox[] = []
         if (Math.abs(slideBox.width - 1280) > 0.5 || Math.abs(slideBox.height - 720) > 0.5) {
           errors.push(`page ${slideIndex + 1}: slide box is ${slideBox.width}x${slideBox.height}, expected 1280x720`)
         }
         for (const leaf of slide.querySelectorAll<HTMLElement>('[data-ppt-id][data-ppt-kind]')) {
           const box = leaf.getBoundingClientRect()
-          for (let row = 0; row < 4; row += 1) for (let column = 0; column < 4; column += 1) {
-            const left = slideBox.left + column * slideBox.width / 4
-            const top = slideBox.top + row * slideBox.height / 4
-            const right = left + slideBox.width / 4
-            const bottom = top + slideBox.height / 4
-            if (box.right > left && box.left < right && box.bottom > top && box.top < bottom) occupancy[row * 4 + column] = 1
-          }
+          leafBoxes.push({
+            left: box.left - slideBox.left, top: box.top - slideBox.top,
+            right: box.right - slideBox.left, bottom: box.bottom - slideBox.top,
+          })
           if (box.left < slideBox.left - 1 || box.top < slideBox.top - 1 || box.right > slideBox.right + 1 || box.bottom > slideBox.bottom + 1) {
             errors.push(`page ${slideIndex + 1}: ${leaf.dataset.pptId} exceeds slide bounds`)
           }
@@ -214,7 +253,7 @@ export class BrowserRuntime {
           page: slideIndex + 1,
           ...(anchor === undefined ? {} : { anchorAreaRatio: Math.max(0, anchor.width * anchor.height) / Math.max(1, slideBox.width * slideBox.height) }),
           frameCount: slide.querySelectorAll('[data-art-role="frame"]').length,
-          occupancy,
+          leafBoxes,
           roleStyles: [...slide.querySelectorAll<HTMLElement>('[data-art-role]')].map(element => {
             const style = getComputedStyle(element)
             return {
@@ -230,6 +269,13 @@ export class BrowserRuntime {
     if (inspection.errors.length > 0) {
       throw new PptError('HTML_CREATE_VALIDATION_FAILED', 'HTML browser validation failed', { details: { issues: inspection.errors } })
     }
+    const designPages: HtmlPreviewResult['designPages'] = inspection.designPages.map(page => ({
+      page: page.page,
+      ...(page.anchorAreaRatio === undefined ? {} : { anchorAreaRatio: page.anchorAreaRatio }),
+      frameCount: page.frameCount,
+      occupancy: occupancySilhouette(page.leafBoxes),
+      roleStyles: page.roleStyles,
+    }))
     const previews: string[] = []
     for (let index = 0; index < pageCount; index += 1) {
       throwIfAborted(signal)
@@ -237,7 +283,7 @@ export class BrowserRuntime {
       await this.cancellable(owner, state.page.locator('.ppt-slide[data-page]').nth(index).screenshot({ path: target, type: 'png', animations: 'disabled' }), signal)
       previews.push(workspaceRelative(workspace, target))
     }
-    return { previews, fonts: inspection.fonts, warnings: inspection.warnings, designPages: inspection.designPages }
+    return { previews, fonts: inspection.fonts, warnings: inspection.warnings, designPages }
   }
 
   async extractDeckIr(owner: SessionOwner, workspace: string, htmlPath: string, pageCount: number, signal?: AbortSignal): Promise<DeckIR> {
@@ -412,22 +458,22 @@ export class BrowserRuntime {
   }
 
   private async resolveVisitUrl(workspace: string, input: string): Promise<URL> {
+    if (isLocalFilesystemPath(input)) return this.resolveLocalFileUrl(workspace, input)
     try {
       const parsed = new URL(input)
-      if (parsed.protocol === 'file:') {
-        const path = await resolveWorkspacePath(workspace, fileURLToPath(parsed), { mustExist: true, kind: 'file' })
-        const outputRoot = await resolveWorkspacePath(workspace, this.outputRoot)
-        if (!isPathInside(outputRoot, path)) throw new PptError('BROWSER_URL_BLOCKED', 'local HTML is outside plugin output')
-        return pathToFileURL(path)
-      }
-      return validatePublicHttpUrl(parsed.href)
+      if (parsed.protocol === 'file:') return await this.resolveLocalFileUrl(workspace, fileURLToPath(parsed))
+      return await validatePublicHttpUrl(parsed.href)
     } catch (error) {
       if (error instanceof PptError) throw error
-      const path = await resolveWorkspacePath(workspace, input, { mustExist: true, kind: 'file' })
-      const outputRoot = await resolveWorkspacePath(workspace, this.outputRoot)
-      if (!isPathInside(outputRoot, path)) throw new PptError('BROWSER_URL_BLOCKED', 'local HTML is outside plugin output')
-      return pathToFileURL(path)
+      return this.resolveLocalFileUrl(workspace, input)
     }
+  }
+
+  private async resolveLocalFileUrl(workspace: string, input: string): Promise<URL> {
+    const path = await resolveWorkspacePath(workspace, input, { mustExist: true, kind: 'file' })
+    const outputRoot = await resolveWorkspacePath(workspace, this.outputRoot)
+    if (!isPathInside(outputRoot, path)) throw new PptError('BROWSER_URL_BLOCKED', 'local HTML is outside plugin output')
+    return pathToFileURL(path)
   }
 
   private async validateCurrentUrl(state: BrowserState): Promise<void> {

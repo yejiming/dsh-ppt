@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { access, readFile, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join } from 'node:path'
-import { JSDOM } from 'jsdom'
 import { atomicWriteJson, atomicWriteText } from './atomic.ts'
 import { ART_ROLES, artDirectionFindings, type ArtDirection, type DesignFinding, validateArtDirection } from './art-direction.ts'
 import type { BrowserRuntime } from './browser.ts'
@@ -12,6 +11,8 @@ import { isPathInside, resolveWorkspacePath, workspaceRelative } from './paths.t
 import type { SessionOwner } from './session-resources.ts'
 
 const LEAF_KINDS = new Set(['text', 'image', 'shape', 'svg', 'table'])
+/** `NodeFilter.SHOW_TEXT`, inlined so the walker call does not depend on the DOM library's globals. */
+const SHOW_TEXT = 4
 const BLOCKED_ELEMENTS = new Set(['SCRIPT', 'IFRAME', 'OBJECT', 'EMBED', 'FORM', 'INPUT', 'TEXTAREA', 'SELECT', 'VIDEO', 'AUDIO', 'CANVAS', 'FOREIGNOBJECT'])
 const ALLOWED_CSS_PREFIXES = [
   'width', 'height', 'min-', 'max-', 'box-sizing', 'position', 'top', 'right', 'bottom', 'left', 'display',
@@ -56,8 +57,14 @@ export async function validateDeckHtmlSource(
   strictDesign = false,
 ): Promise<{ fonts: string[]; primaryFonts: string[]; unsupported: string[]; designFindings: DesignFinding[] }> {
   if (Buffer.byteLength(html) > 5 * 1024 * 1024) throw new PptError('PPT_RESOURCE_LIMIT', 'HTML source exceeds 5 MiB')
-  const dom = new JSDOM(html)
-  const document = dom.window.document
+  // Loaded on demand: the DOM implementation is a large module graph and this is
+  // the only consumer, so the plugin entry must not pull it during host startup.
+  const { Window } = await import('happy-dom')
+  const domWindow = new Window()
+  domWindow.document.write(html)
+  // happy-dom types its element queries by tag-name map and rejects the standard
+  // `querySelectorAll<HTMLElement>` generics; the runtime document is a standard DOM.
+  const document = domWindow.document as unknown as Document
   const issues: string[] = []
   const unsupported = new Set<string>()
   const allowedFonts = new Set(FONT_REGISTRY.map(font => font.name))
@@ -114,7 +121,7 @@ export async function validateDeckHtmlSource(
         designFindings.push({ code: 'ART_GROUPED_FRAMES_NOT_REALIZED', severity: 'warning', message: 'grouped frame policy is not visibly realized', page: index + 1 })
       }
     }
-    const walker = document.createTreeWalker(slide, dom.window.NodeFilter.SHOW_TEXT)
+    const walker = document.createTreeWalker(slide, SHOW_TEXT)
     for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
       if ((node.textContent ?? '').trim().length > 0 && node.parentElement?.closest('[data-ppt-id][data-ppt-kind]') === null) {
         issues.push(`page ${index + 1} contains visible text outside a convertible leaf`)
@@ -159,7 +166,7 @@ export async function validateDeckHtmlSource(
       issues.push(`missing or invalid local asset: ${ref}`)
     }
   }
-  dom.window.close()
+  domWindow.close()
   if (issues.length > 0) throw new PptError('HTML_CREATE_VALIDATION_FAILED', 'HTML static validation failed', { details: { issues } })
   return { fonts: [...usedFonts].sort(), primaryFonts: [...primaryFonts].sort(), unsupported: [...unsupported].sort(), designFindings }
 }

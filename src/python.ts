@@ -108,7 +108,7 @@ export class PythonRuntime {
     this.resources.open(owner, workspace)
     const resolvedExecutable = await this.subprocess.resolveExecutable(this.executable, undefined, signal)
     const environment = { MPLBACKEND: 'Agg', PYTHONNOUSERSITE: '1', PYTHONDONTWRITEBYTECODE: '1' }
-    const preflight = this.sandbox.confine(
+    const preflight = await this.sandbox.confine(
       [resolvedExecutable, '-c', 'import matplotlib, PIL, cv2; matplotlib.use("Agg"); print("ready")'],
       { mode: 'read-only', workspaceRoot: workspace },
     )
@@ -137,7 +137,7 @@ export class PythonRuntime {
       'import PIL, cv2',
       input.code,
     ].join('\n')
-    const confined = this.sandbox.confine([resolvedExecutable, '-'], { mode: 'workspace-write', workspaceRoot: workspace })
+    const confined = await this.sandbox.confine([resolvedExecutable, '-'], { mode: 'workspace-write', workspaceRoot: workspace })
     if (confined.enforcement !== 'full') throw new PptError('PPT_CAPABILITY_UNAVAILABLE', 'Python sandbox enforcement is partial')
     const started = Date.now()
     let result

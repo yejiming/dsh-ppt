@@ -1,3 +1,4 @@
+import type { InstalledFontFace } from './font-files.ts';
 export interface FontDescriptor {
     name: string;
     aliases?: readonly string[];
@@ -28,6 +29,16 @@ export interface DiscoveredFont {
 }
 export declare function discoverRegisteredFonts(extraDirs?: readonly string[], platform?: SupportedFontPlatform): Promise<DiscoveredFont[]>;
 export declare const FONT_FALLBACKS: Readonly<Record<string, readonly string[]>>;
+/**
+ * Adapts the machine-wide font inventory onto the shape the outline resolver
+ * already understands, so a deck may name any font that is actually installed
+ * instead of only the families in the built-in registry. Coverage is rebuilt
+ * from the face flags: a code point enters the set only when the face claims the
+ * script covering it, which keeps `supportsText` meaningful without re-reading
+ * every glyph table of every installed font. Pass `wanted` to restrict the
+ * conversion to the families a deck actually names.
+ */
+export declare function installedFontsAsDiscovered(faces: readonly InstalledFontFace[], wanted?: ReadonlySet<string>): DiscoveredFont[];
 export declare function registeredFont(name: string): FontDescriptor | undefined;
 export declare function fontFallbackCandidates(name: string, text: string, platform?: NodeJS.Platform): readonly string[];
 export declare function supportsText(font: DiscoveredFont, text: string): boolean;
